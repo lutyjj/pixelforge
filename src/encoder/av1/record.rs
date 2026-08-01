@@ -323,7 +323,14 @@ impl Av1 {
         }
         all_reference_slots.extend_from_slice(&reference_slots);
 
-        let is_first_frame = plan.is_first_frame();
+        // Reset the coding state on every key frame, not just the first.
+        // NVIDIA's AV1 encoder produces undecodable key frames mid-session
+        // when rate control is active (the tile data is inconsistent with the
+        // emitted frame header; conformant decoders reject the frame and every
+        // frame after it). Re-running the RESET + rate control control command
+        // at each key frame yields valid bitstreams, and restarting rate
+        // control at IDR cadence has no practical cost for streaming.
+        let reset_coding_state = plan.is_first_frame() || is_key_frame;
         // Clamp GOP values to at least 1; a value of 0 is undefined in
         // Vulkan and causes undefined behavior on some drivers (RADV).
         let gop_frames = common.config.gop_size.max(1);
@@ -336,7 +343,7 @@ impl Av1 {
         // Reset and write start timestamp
         reset_start_timestamp(common.device(), command_buffer, timestamp_query_pool);
 
-        let begin_coding_info = if is_first_frame {
+        let begin_coding_info = if reset_coding_state {
             vk::VideoBeginCodingInfoKHR::default()
                 .video_session(common.session)
                 .video_session_parameters(common.session_params)
@@ -357,7 +364,7 @@ impl Av1 {
                 .cmd_begin_video_coding(command_buffer, &begin_coding_info);
         }
 
-        if is_first_frame {
+        if reset_coding_state {
             let mut quality_level_info =
                 vk::VideoEncodeQualityLevelInfoKHR::default().quality_level(0);
             let control_info = vk::VideoCodingControlInfoKHR::default()
